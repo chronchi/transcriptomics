@@ -1,0 +1,60 @@
+"0","pairsplot_pca <- PCAtools::pairsplot(
+    pca,
+    colby = ""subtype"",
+    shape = ""cluster"",
+    lab = NULL, 
+    legendPosition = ""right"", 
+    components = paste0(""PC"", 1:5), 
+    pointSize = 3
+)
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"
+"2","Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+"

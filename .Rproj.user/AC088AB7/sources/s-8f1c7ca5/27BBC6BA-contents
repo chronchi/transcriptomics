@@ -1,0 +1,162 @@
+# METABRIC
+
+## Packages to use
+
+First load the packages that will be used along the cleaning
+process. Always do this at the beginning of your script to make
+things organized. 
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(TCGAbiolinks)
+library(singscore)
+library(GEOquery)
+
+library(SummarizedExperiment)
+```
+
+
+## Introduction
+
+To download the clinical data and expression levels from the METABRIC cohort
+go to cbioportal and select the respective cohort (METABRIC):
+https://www.cbioportal.org/
+
+Here we will load and format the metabric data in the same way as
+SCAN-B and the AI dataset, 
+so it is standardized and better to use in future analysis. 
+For this, we use the summarized experiment object to store expression data
+and clinical information.
+
+
+Loading gene expression levels. 
+```{r}
+expression_data <- read.csv(
+  "Data/20210713_metabric/data_mRNA_median_all_sample_Zscores.txt",
+  sep = "\t",
+  check.names = FALSE
+)
+
+dim(expression_data)
+```
+
+We note that the first two columns correspond to HUGO symbol and ENTREZ ID.
+
+Since genes were znormalized, we select the first appearance in the list
+of genes that are duplicated.
+
+```{r}
+expression_data <- expression_data[!duplicated(expression_data$Hugo_Symbol), ]
+```
+
+Load now clinical data.
+
+```{r}
+clinical_data <- read.csv(
+  "Data/20210713_metabric/data_clinical_patient.txt",
+  sep = "\t",
+  comment.char = "#"
+)
+
+glimpse(clinical_data)
+```
+
+We see that there are over 2500 rows, meaning that we have more patients with
+clinical data than expression levels. Let us now select patients that have
+expression levels.
+
+```{r}
+length(unique(clinical_data$PATIENT_ID)) == nrow(clinical_data)
+```
+
+We see that each row has a unique identifier, the patient ID, so we set
+this as a rowname.
+
+```{r}
+rownames(clinical_data) <- clinical_data$PATIENT_ID
+```
+
+And we check if all patients from expression data have clinical data.
+
+```{r}
+length(intersect(clinical_data$PATIENT_ID, colnames(expression_data[, -c(1,2)]))) ==
+  ncol(expression_data)-2
+```
+
+Indeed it has, therefore we can just subselect clinical data and create the 
+file like TCGA and SCAN-B.
+
+```{r}
+clinical_data <- clinical_data[colnames(expression_data[, -c(1,2)]), ]
+rownames(expression_data) <- expression_data$Hugo_Symbol
+row_ranges <- expression_data[, c(1,2)]
+expression_data <- expression_data[, -c(1,2)]
+```
+
+```{r}
+metabric_intensity_values <- read.delim(
+    "Data/20210713_metabric/data_expression_median.txt",
+    sep = "\t",
+    header = TRUE
+) %>% dplyr::mutate(Entrez_Gene_Id = NULL) %>%
+    `colnames<-`(stringr::str_replace_all(colnames(.), stringr::fixed("."), "-"))
+```
+
+Before we just average the duplicated genes median intensity. 
+
+```{r}
+duplicated_genes <- metabric_intensity_values$Hugo_Symbol[duplicated(metabric_intensity_values$Hugo_Symbol)]
+median_genes <- sapply(
+    metabric_intensity_values$Hugo_Symbol[
+        duplicated(metabric_intensity_values$Hugo_Symbol)
+    ] %>% unique,
+    function(gene, df){
+        df %>% dplyr::filter(Hugo_Symbol == gene) %>%
+            dplyr::mutate(Hugo_Symbol = NULL) %>%
+            as.matrix(.) %>%
+            MatrixGenerics::colMedians(.)
+    },
+    df = metabric_intensity_values
+)
+
+metabric_exp <- metabric_intensity_values
+metabric_exp <- metabric_exp[!duplicated(metabric_exp$Hugo_Symbol), ]
+rownames(metabric_exp) <- metabric_exp$Hugo_Symbol
+metabric_exp$Hugo_Symbol <- NULL
+metabric_exp[colnames(median_genes), ] <- median_genes %>% t
+```
+
+```{r}
+# add new clinical data to the summarized experiment object.
+metabric <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(
+        zscores = expression_data, 
+        median_intensity = metabric_exp[
+            rownames(expression_data), 
+            colnames(expression_data)
+        ]
+    ), 
+    colData = clinical_data
+)
+```
+
+Add ranking of the genes.
+```{r}
+assay(metabric, "rank") <- singscore::rankGenes(assay(metabric, "median_intensity"))
+```
+
+Load also the median intensity values as well.
+
+```{r}
+# save the final dataset
+saveRDS(
+    metabric, 
+    file = file.path("Data/20210713_metabric/metabric_filtered.rds")
+)
+```
+
+```{r}
+write.csv(x = row_ranges, file = "Data/20210713_metabric/HUGO_ENTREZ.csv", row.names = FALSE)
+```

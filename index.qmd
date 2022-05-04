@@ -1,0 +1,8 @@
+# Preface {.unnumbered}
+
+In this book I will show how several publicly available 
+datasets are filtered and organized in a way that is 
+easy to do transcriptomic analysis with them. 
+
+The book is divided in several chapters, one for each 
+dataset. 

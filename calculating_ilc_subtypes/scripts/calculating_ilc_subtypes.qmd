@@ -1,0 +1,133 @@
+---
+title: "Untitled"
+---
+
+## Loading packages
+
+```{r}
+library(pacman)
+
+pacman::p_load(
+    dplyr,
+    
+    SummarizedExperiment
+)
+```
+
+
+## Loading the datasets
+
+```{r}
+metabric <- readRDS("../../../../BioRepo/Data/20210713_metabric/metabric_filtered.rds")
+```
+
+```{r}
+scanb <- readRDS("~/Documents/brisken-lab/BioRepo/Data/20170309_GSE96058/sweden_df_filtered.rds")
+```
+
+## Loading the gene list
+
+```{r}
+gene_list <- read.table("../data/gene_list.txt", sep = "|", header = TRUE)
+gene_list %>% head
+```
+
+
+## Loading the assigned classes
+
+```{r}
+classes_metabric <- read.table("../data/metabric_subtypes.txt") %>%
+    `colnames<-`(c("name_patient", "cohort", "subtype")) %>%
+    dplyr::mutate(name_patient = stringr::str_replace(name_patient, "\\.", "-"))
+
+classes_metabric %>% head
+```
+
+## Running k-means
+
+We now run k-means with $k=3$ to see if we can recapitulate the clusters done
+in the paper. We calculate normalized rank of the 60 genes and use it 
+to calculate the k-means. 
+
+```{r}
+ilc_metabric <- colData(metabric) %>% data.frame %>% 
+    dplyr::filter(HISTOLOGICAL_SUBTYPE == "Lobular")
+```
+
+Out of the 60 genes, 54 are available. We will use those instead. 
+
+```{r}
+available_genes <- intersect(metabric %>% rownames, gene_list$symbol)
+```
+
+```{r}
+ilc_metabric <- metabric[
+    available_genes, 
+    intersect(ilc_metabric$PATIENT_ID, classes_metabric$name_patient)
+]
+```
+
+```{r}
+metabric_ilc_kmeans <- stats::kmeans(
+    t(assay(ilc_metabric, "rank")/nrow(metabric)), 
+    centers = 3
+)
+
+metabric_ilc_kmeans$cluster %>% table
+```
+
+Let us check cluster 1 and compare to the baseline.
+
+```{r}
+classes_metabric %>% dplyr::filter(
+    name_patient %in% colnames(ilc_metabric)
+) %>% janitor::tabyl(subtype)
+```
+
+We now do a PCA and color by the clusters.
+
+```{r}
+pca <- PCAtools::pca(
+    assay(ilc_metabric, "median_intensity"),
+    metadata = dplyr::bind_cols(
+        classes_metabric %>% dplyr::mutate(PATIENT_ID = name_patient) %>%
+            dplyr::filter(name_patient %in% colnames(ilc_metabric)),
+        colData(ilc_metabric) %>% data.frame %>% 
+            dplyr::mutate(cluster = as.character(
+                metabric_ilc_kmeans$cluster[colnames(ilc_metabric)]
+            )),
+        by = "PATIENT_ID"
+    )
+)
+```
+
+```{r}
+PCAtools::biplot(
+    pca,
+    colby = "subtype",
+    shape = "cluster",
+    lab = NULL, 
+    legendPosition = "right",
+    x = "PC1",
+    y = "PC2"
+)
+```
+
+```{r}
+#| fig-width: 16
+#| fig-height: 10
+
+pairsplot_pca <- PCAtools::pairsplot(
+    pca,
+    colby = "subtype",
+    shape = "cluster",
+    lab = NULL, 
+    legendPosition = "right", 
+    components = paste0("PC", 1:5), 
+    pointSize = 3
+)
+
+pairsplot_pca
+```
+
+

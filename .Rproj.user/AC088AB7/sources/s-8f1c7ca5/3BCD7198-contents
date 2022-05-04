@@ -1,0 +1,171 @@
+# SCANB
+
+## Packages to use
+
+First load the packages that will be used along the cleaning
+process. Always do this at the beginning of your script to make
+things organized. 
+
+```{r, message=FALSE}
+library(DESeq2)
+library(TCGAbiolinks)
+library(GEOquery)
+
+library(dplyr)
+library(ggplot2)
+```
+
+## Introduction
+
+SCAN-B is an early stage breast cancer cohort from Sweden. Clinical and 
+gene expression level data is available for several patients. 
+
+To download the gene expression levels, one can check in the GEO database
+under the accession code GSE96058. One can download the 
+clinical data in their mutation explorer tool found here: 
+https://oncogenomics.bmc.lu.se/MutationExplorer/
+
+## Downloading data
+
+We downloaded the clinical data from SCAN-B website and the 
+expression matrix (FPKM) from the GEO website using accession code
+GSE96058.
+
+```{r}
+sweden_clin_data <- read.table(
+    "data/clinical_data.tsv",
+    header = TRUE,
+    sep = "\t"
+)
+
+glimpse(sweden_clin_data)
+```
+
+Loading the gene expression levels.
+
+```{r}
+gene_expression_levels <- read.table(
+    paste0(
+        "data/",
+        "GSE96058_gene_expression_3273_samples_and_136_replicates_transformed.csv"), 
+    sep = ",",
+    header = TRUE,
+    row.names = 1
+)
+```
+
+We check the dimension of the dataset.
+
+```{r}
+dim(gene_expression_levels)
+```
+
+Now we fetch the clinical data from the GEO database.
+
+```{r}
+gse <- getGEO(
+    GEO = "GSE96058", 
+    GSEMatrix = TRUE, 
+    destdir = "./data"
+)
+
+pheno_data <- pData(gse[["GSE96058-GPL11154_series_matrix.txt.gz"]])
+```
+
+## Cleaning and integrating
+
+We remove the samples with the replicate in the name, as these 
+won't be necessary for the analysis.
+
+```{r}
+gene_no_replicates <- gene_expression_levels[
+    , 
+    !grepl(colnames(gene_expression_levels), pattern = "repl")
+]
+
+# select only patients that have clinical information
+gene_no_replicates <- gene_no_replicates[
+    , 
+    intersect(colnames(gene_no_replicates), pheno_data$title)
+]
+```
+
+And then we need to match the columns from the clinical data with the 
+gene expression levels.
+
+```{r}
+# subselect clinical data and change row names to match column names
+# from expression levels. We will create then a summarized experiment
+# table. 
+pheno_data_sub <- pheno_data[
+    match(colnames(gene_no_replicates), pheno_data$title), 
+]
+
+# check if expression levels number of columns and number of rows have the
+# same patients
+length(intersect(colnames(gene_no_replicates), pheno_data_sub$title)) ==
+  ncol(gene_no_replicates)
+
+rownames(pheno_data_sub) <- pheno_data_sub$title
+```
+
+And now we can merge the downloaded clinical data.
+
+```{r}
+# first we will fetch the pheno data downloaded from the scan-b mutation
+# explorer
+scanb_id <- sapply(
+    pheno_data_sub[, "scan-b external id:ch1"], 
+    stringr::str_extract,
+    pattern = "S.*\\.g"
+)
+
+pheno_data_sub$scanb_id <- scanb_id
+
+# subselect patients that are in both datasets
+scanb_both <- intersect(scanb_id, sweden_clin_data$SAMPLE)
+
+# subselect now 
+pheno_data_subsub <- pheno_data_sub %>% 
+  dplyr::filter(scanb_id %in% scanb_both)
+
+dim(pheno_data_subsub)
+```
+
+```{r}
+# we now subselect the rows from sweden_clin_data using the scanb_id
+sweden_clin_data_sub <- sweden_clin_data %>% 
+    dplyr::filter(SAMPLE %in% scanb_both)
+
+# add filename F* as a column name
+name_expression <- sapply(
+    sweden_clin_data_sub$SAMPLE,
+    function(x){
+        pheno_data_subsub[which(x == pheno_data_subsub$scanb_id), "title"]
+    }
+)
+
+length(unique(name_expression)) == nrow(pheno_data_subsub)
+```
+
+```{r}
+sweden_clin_data_sub$name_expression <- name_expression
+rownames(sweden_clin_data_sub) <- sweden_clin_data_sub$name_expression
+```
+
+And as with the AI dataset, we create a SummarizedExperiment object
+to save the data and use it later in the downstream analysis.
+
+```{r}
+# add new clinical data to the summarized experiment object.
+sweden_df <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(logFPKM = gene_no_replicates[, rownames(sweden_clin_data_sub)]), 
+    colData = sweden_clin_data_sub
+)
+
+# save the final dataset
+saveRDS(
+    sweden_df, 
+    file = file.path("data/sweden_df_filtered.rds")
+)
+```

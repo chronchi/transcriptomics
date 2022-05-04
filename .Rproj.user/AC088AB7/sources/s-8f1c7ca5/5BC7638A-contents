@@ -1,0 +1,321 @@
+# AI - GSE105777
+
+## Packages to use
+
+First load the packages that will be used along the cleaning
+process. Always do this at the beginning of your script to make
+things organized. 
+
+```{r, message=FALSE}
+library(GEOquery)
+library(SummarizedExperiment)
+
+library(dplyr)
+library(tidyr)
+library(janitor)
+
+library(readxl)
+
+library(ggplot2)
+```
+
+## Introduction
+
+We will download and process the aromatase inhibitor data available
+at GEO under accession code: GSE105777. The data is associated
+to the paper 
+https://breast-cancer-research.biomedcentral.com/articles/10.1186/s13058-019-1223-z. 
+
+Ki67 levels are also available to these patients in the supplementary data.
+We will also download the data available there and combine it here.
+
+## Downloading data
+
+To download the data use the package GEOquery from Bioconductor and
+specify the accession code. Save also the data on a directory of your 
+choice. In this case I chose a subfolder called data in my current directory.
+
+```{r}
+gse_ai <- GEOquery::getGEO(
+    "GSE105777", 
+    destdir = "./data", 
+    GSEMatrix = TRUE
+)[[1]]
+```
+
+The function `exprs` from the package Biobase (automatically loaded if
+you have bioconductor) let us check the expression levels of the
+expression set downloaded with GEOquery.
+
+```{r}
+exprs(gse_ai)
+```
+
+And since this is a microarray experiment we need information to 
+map the probe ids to the genes. This information is stored in the
+feature slot of the expression set above. To retrieve it use
+the function `fData`.
+
+```{r}
+fData(gse_ai)
+```
+
+And now load the ki67 levels data from the supplementary material. Remember
+to specify the folder where your file is located. The table is pivoted
+for the ki67 levels, such that each patient will have two rows, one for baseline
+and another for surgery.
+
+```{r}
+ki67_levels <- readxl::read_excel(
+    path = "data/13058_2019_1223_MOESM2_ESM.xlsx",
+    range = "TableS4!A3:L257", 
+) %>% janitor::clean_names() %>% 
+    tidyr::pivot_longer(
+        cols = c("baseline_ki67", "surgery_ki67"), 
+        names_to = "timepoint",
+        values_to = "ki67"
+    ) %>% 
+    dplyr::mutate(ki67 = as.numeric(ki67)) %>%
+    dplyr::mutate(
+        title = ifelse(
+            group == "Peri AI",
+            paste0(
+                "AI.", 
+                number_254_tumours_control_56_ai_treated_198,
+                ifelse(timepoint == "baseline_ki67", "B", "S")
+            ),
+            paste0(
+                number_254_tumours_control_56_ai_treated_198,
+                ifelse(timepoint == "baseline_ki67", "B", "S")
+            )
+        )
+    )
+
+ki67_levels %>% head
+```
+
+## Cleaning and integrating
+
+We start now integrating the clinical data available from the GEOquery 
+with the ki67 levels data. 
+
+```{r}
+# first convert the title of control samples (reanalysis) to the same
+# format as the treated patients. this will make it easier down the line
+# to match samples
+col_data <- pData(gse_ai) %>%
+    dplyr::mutate(
+        title = ifelse(
+            !stringr::str_detect(title, "reanalysis"), 
+            title,
+            paste0(
+                "Control.", 
+                as.integer(stringr::str_extract(title, "\\d+")),
+                ifelse(`sampling time:ch1` == "diagnosis", "B", "S")
+            )
+        )
+    )
+
+col_data$title %>% tail
+```
+
+We now add both together. The function `inner_join` from the dplyr
+package is very powerful. Remember to always specify by which column you want
+to merge. It is usually very fast to merge tables this way, since it handles
+the matching of the columns for you. 
+
+```{r}
+final_col_data <- dplyr::inner_join(
+    ki67_levels,
+    col_data %>% tibble::rownames_to_column(var = "gsm_name"),
+    by = "title"
+)
+```
+
+To check the total number of patients, use the code below. 
+
+```{r}
+final_col_data$patient_id %>% table %>% length
+```
+ 
+The number of controls are:
+
+```{r}
+final_col_data %>% dplyr::filter(
+    group == "No Peri AI"
+) %>% janitor::tabyl(number) %>% nrow
+```
+
+And the number of treated patients are:
+
+```{r}
+final_col_data %>% dplyr::filter(
+    group == "Peri AI"
+) %>% janitor::tabyl(number) %>% nrow
+```
+
+And since we have multiple illumina IDs mapping to the same gene,
+we take their average. 
+
+```{r}
+# we first start removing the duplicated genes, but
+# we will change the average expression levels later
+gse_ai <- gse_ai[-which(is.na(exprs(gse_ai)), arr.ind = TRUE)[, 1], ]
+```
+
+Below we calculate the average intensity for probe ids with multiple
+hugo symbols. 
+
+```{r}
+# first get the duplicated symbols
+duplicated_symbols <- fData(gse_ai) %>%
+    janitor::tabyl(ILMN_Gene) %>%
+    dplyr::filter(n > 1)
+
+# and check what are the probe ids available in the data
+duplicated_ilmns <- fData(gse_ai) %>% dplyr::filter(
+    ILMN_Gene %in% duplicated_symbols$ILMN_Gene
+)
+
+# here we use sapply to calculate the average median intensity
+# for each hugo symbol. this approach is faster than using a for loop.
+# whenever you can i suggest to use sapply in R instead of a for loop.
+mean_intensity <- sapply(
+    duplicated_symbols$ILMN_Gene,
+    function(symbol, gse_ai, fdata){
+        
+        ilmn_ids <- fdata %>% dplyr::filter(
+            ILMN_Gene == symbol
+        ) %>% dplyr::pull(ID)
+        
+        colMeans(exprs(gse_ai)[ilmn_ids, ], na.rm = TRUE)
+        
+    },
+    gse_ai = gse_ai,
+    fdata = fData(gse_ai)
+)
+```
+
+We now remove from the expression matrix the duplicated genes and
+then add their mean values.
+
+```{r}
+exprs_vals <- exprs(gse_ai)[-which(rownames(gse_ai) %in% duplicated_ilmns$ID), ]
+
+# first change the name of the current illumina ids 
+rownames(exprs_vals) <- fData(gse_ai)[rownames(exprs_vals), "ILMN_Gene"]
+
+# now we add the average values
+exprs_vals <- rbind(
+    exprs_vals,
+    t(data.frame(mean_intensity))
+)
+```
+
+And before saving the final object, we clean the clinical data available
+to us so it is easier to work with. Below we show all the columns available to 
+see which columns will be dropped.
+
+```{r}
+final_col_data %>% colnames
+```
+
+After inspecting, the columns that will be dropped are shown below.
+
+```{r}
+columns_to_drop <- c(
+    "geo_accession", "status", "submission_date", "last_update_date", 
+    "type", "channel_count", "source_name_ch1", "organism_ch1",
+    "molecule_ch1", "extract_protocol_ch1", "label_ch1", "label_protocol_ch1",
+    "taxid_ch1", "hyb_protocol", "scan_protocol", "data_processing",
+    "platform_id", "contact_name", "contact_email", "contact_laboratory",
+    "contact_department", "contact_institute", "contact_address", "contact_city",
+    "contact_state", "contact_zip/postal_code", "contact_country",
+    "supplementary_file", "data_row_count", "relation",
+    "Sex:ch1", "tissue:ch1", "characteristics_ch1",
+    "characteristics_ch1.1", "characteristics_ch1.2", "characteristics_ch1.4",
+    "characteristics_ch1.5", "her2:ch1", "timepoint:ch1", "sampling time:ch1",
+    "group", "paired_or_baseline_single", # all samples are paired in this case 
+    "number_254_tumours_control_56_ai_treated_198", "characteristics_ch1.3",
+    "disease:ch1", "subtype:ch1", "description", "title"
+)
+
+final_col_data_drop <- final_col_data %>% 
+    dplyr::mutate(pam50 = as.character(`subtype:ch1`)) %>%
+    dplyr::select(-dplyr::one_of(columns_to_drop)) %>% 
+    dplyr::mutate(
+        timepoint = stringr::str_replace_all(timepoint, "_ki67", ""),
+        r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent = ifelse(
+            is.na(r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent),
+            "not_available",
+            ifelse(
+                r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent == "non-responder",
+                "non_responder",
+                r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent
+            )
+        ),
+        ccca_surgery_ki67_2_7 = ifelse(
+            is.na(ccca_surgery_ki67_2_7),
+            "not_available",
+            ccca_surgery_ki67_2_7
+        ),
+        pam50 = tolower(pam50)
+    ) %>% 
+    dplyr::mutate(
+        pam50 = ifelse(is.na(pam50), "not_available", pam50),
+        number = as.character(number),
+        name_patient = paste(`group:ch1`, paste0("nb", number), timepoint, sep = "_")
+    ) %>% 
+    dplyr::rename(
+        group = `group:ch1`,
+        patient_nb = number
+    ) %>% data.frame %>% 
+    `rownames<-`(.$name_patient)
+```
+
+Glimpse is a function to show some entries of all your columns in a nice way.
+
+```{r}
+dplyr::glimpse(final_col_data_drop)
+```
+
+After cleaning the clinical data, we can merge with the expression data
+and save using a summarized experiment object. We just make
+sure the columns are in the right order first. 
+
+```{r}
+match_names <- match(colnames(exprs_vals), final_col_data_drop$gsm_name)
+colnames(exprs_vals) <- final_col_data_drop[
+    match_names,
+    "name_patient"
+]
+```
+
+And we use an object from the package SummarizedExperiment to store
+the data. The idea is similar to an ExpressionSet, but the functions
+to access the data are a bit diffrent. Instead of using `exprs`, one
+now uses `assay` and to get the clinical data one uses `colData` instead
+of using `pData`. There is no feature data in this case. 
+
+```{r}
+gse_ai <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(
+        normalized_intensity = exprs_vals
+    ),
+    colData = final_col_data_drop[colnames(exprs_vals), ]
+)
+```
+
+I highly suggest to save this object in an rds object, so
+you do the cleaning process just once and data is ready
+to use afterwards.
+
+```{r}
+saveRDS(gse_ai, "data/gse_ai.rds")
+```
+
+And to reload the data into R the `readRDS` function can be used.
+
+```{r}
+gse_ai <- readRDS("data/gse_ai.rds")
+```

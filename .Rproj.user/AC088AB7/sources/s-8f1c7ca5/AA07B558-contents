@@ -1,0 +1,1223 @@
+---
+title: "Downloading and processing data from GSE105777"
+author: "Carlos Ronchi"
+date: "2022.04.19"
+output:
+  tufte::tufte_html: default
+  tufte::tufte_handout:
+    citation_package: natbib
+    latex_engine: xelatex
+  tufte::tufte_book:
+    citation_package: natbib
+    latex_engine: xelatex
+link-citations: yes
+---
+
+```{r setup, include=FALSE}
+library(tufte)
+# invalidate cache when the tufte version changes
+knitr::opts_chunk$set(
+    cache.extra = packageVersion('tufte'),
+    fig.width = 16,
+    fig.height = 10
+)
+options(htmltools.dir.version = FALSE, bitmapType = "cairo")
+```
+
+```{r, message=FALSE}
+library(GEOquery)
+library(SummarizedExperiment)
+
+library(dplyr)
+library(tidyr)
+library(janitor)
+
+library(readxl)
+
+library(ggplot2)
+```
+
+# Introduction
+
+We will download and process the aromatase inhibitor data available
+at GEO under accession code: GSE105777. The data is associated
+to the paper 
+https://breast-cancer-research.biomedcentral.com/articles/10.1186/s13058-019-1223-z. 
+
+Ki67 levels are also available to these patients in the supplementary data.
+We will also download the data available there and combine it here.
+
+# Downloading data
+
+```{r}
+gse_ai <- GEOquery::getGEO(
+    "GSE105777", 
+    destdir = "./data", 
+    GSEMatrix = TRUE
+)[[1]]
+```
+
+```{r}
+exprs(gse_ai)
+```
+
+```{r}
+fData(gse_ai)
+```
+
+
+
+```{r}
+ki67_levels <- readxl::read_excel(
+    path = "data/13058_2019_1223_MOESM2_ESM.xlsx",
+    range = "TableS4!A3:L257", 
+) %>% janitor::clean_names() %>% 
+    tidyr::pivot_longer(
+        cols = c("baseline_ki67", "surgery_ki67"),
+        names_to = "timepoint",
+        values_to = "ki67"
+    ) %>% 
+    dplyr::mutate(ki67 = as.numeric(ki67)) %>%
+    dplyr::mutate(
+        title = ifelse(
+            group == "Peri AI",
+            paste0(
+                "AI.", 
+                number_254_tumours_control_56_ai_treated_198,
+                ifelse(timepoint == "baseline_ki67", "B", "S")
+            ),
+            paste0(
+                number_254_tumours_control_56_ai_treated_198,
+                ifelse(timepoint == "baseline_ki67", "B", "S")
+            )
+        )
+    )
+
+ki67_levels %>% head
+```
+
+```{r}
+col_data <- pData(gse_ai) %>%
+    dplyr::mutate(
+        title = ifelse(
+            !stringr::str_detect(title, "reanalysis"), 
+            title,
+            paste0(
+                "Control.", 
+                as.integer(stringr::str_extract(title, "\\d+")),
+                ifelse(`sampling time:ch1` == "diagnosis", "B", "S")
+            )
+        )
+    )
+
+col_data$title %>% tail
+```
+
+We now add both together. 
+
+```{r}
+final_col_data <- dplyr::inner_join(
+    ki67_levels,
+    col_data %>% tibble::rownames_to_column(var = "gsm_name"),
+    by = "title"
+)
+```
+
+There is a total number of patients:
+```{r}
+final_col_data$patient_id %>% table %>% length
+```
+ 
+The number of controls are:
+```{r}
+final_col_data %>% dplyr::filter(
+    group == "No Peri AI"
+) %>% janitor::tabyl(number) %>% nrow
+```
+
+And the number of treated patients are:
+```{r}
+final_col_data %>% dplyr::filter(
+    group == "Peri AI"
+) %>% janitor::tabyl(number) %>% nrow
+```
+
+And since we have multiple illumina IDs mapping to the same gene,
+we take their average. 
+
+```{r}
+gse_ai <- gse_ai[-which(is.na(exprs(gse_ai)), arr.ind = TRUE)[, 1], ]
+```
+
+
+```{r}
+duplicated_symbols <- fData(gse_ai) %>%
+    janitor::tabyl(ILMN_Gene) %>%
+    dplyr::filter(n > 1)
+
+duplicated_ilmns <- fData(gse_ai) %>% dplyr::filter(
+    ILMN_Gene %in% duplicated_symbols$ILMN_Gene
+)
+
+mean_intensity <- sapply(
+    duplicated_symbols$ILMN_Gene,
+    function(symbol, gse_ai, fdata){
+        
+        ilmn_ids <- fdata %>% dplyr::filter(
+            ILMN_Gene == symbol
+        ) %>% dplyr::pull(ID)
+        
+        colMeans(exprs(gse_ai)[ilmn_ids, ], na.rm = TRUE)
+        
+    },
+    gse_ai = gse_ai,
+    fdata = fData(gse_ai)
+)
+```
+
+We now remove from the expression matrix the duplicated genes and
+then add their mean values.
+
+```{r}
+exprs_vals <- exprs(gse_ai)[-which(rownames(gse_ai) %in% duplicated_ilmns$ID), ]
+
+# first change the name of the current illumina ids 
+rownames(exprs_vals) <- fData(gse_ai)[rownames(exprs_vals), "ILMN_Gene"]
+
+# now we add the average values
+exprs_vals <- rbind(
+    exprs_vals,
+    t(data.frame(mean_intensity))
+)
+```
+
+And before saving the final object, we clean the clinical data available
+to us so it is easier to work with. Below we show all the columns available. 
+
+We will drop some of them. 
+
+```{r}
+final_col_data %>% colnames
+```
+
+```{r}
+columns_to_drop <- c(
+    "geo_accession",
+    "status",
+    "submission_date",
+    "last_update_date",
+    "type",
+    "channel_count",
+    "source_name_ch1",
+    "organism_ch1",
+    "molecule_ch1",
+    "extract_protocol_ch1",
+    "label_ch1",
+    "label_protocol_ch1",
+    "taxid_ch1",
+    "hyb_protocol",
+    "scan_protocol",
+    "data_processing",
+    "platform_id",
+    "contact_name",
+    "contact_email",
+    "contact_laboratory",
+    "contact_department",
+    "contact_institute",
+    "contact_address",
+    "contact_city",
+    "contact_state",
+    "contact_zip/postal_code",
+    "contact_country",
+    "supplementary_file",
+    "data_row_count",
+    "relation",
+    "Sex:ch1",
+    "tissue:ch1",
+    "characteristics_ch1",
+    "characteristics_ch1.1",
+    "characteristics_ch1.2",
+    "characteristics_ch1.4",
+    "characteristics_ch1.5",
+    "her2:ch1",
+    "timepoint:ch1",
+    "sampling time:ch1",
+    "group",
+    "paired_or_baseline_single", # all samples are paired in this case
+    "number_254_tumours_control_56_ai_treated_198",
+    "characteristics_ch1.3",
+    "disease:ch1",
+    "subtype:ch1",
+    "description",
+    "title"
+)
+
+final_col_data_drop <- final_col_data %>% 
+    dplyr::mutate(pam50 = as.character(`subtype:ch1`)) %>%
+    dplyr::select(-dplyr::one_of(columns_to_drop)) %>% 
+    dplyr::mutate(
+        timepoint = stringr::str_replace_all(timepoint, "_ki67", ""),
+        r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent = ifelse(
+            is.na(r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent),
+            "not_available",
+            ifelse(
+                r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent == "non-responder",
+                "non_responder",
+                r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent
+            )
+        ),
+        ccca_surgery_ki67_2_7 = ifelse(
+            is.na(ccca_surgery_ki67_2_7),
+            "not_available",
+            ccca_surgery_ki67_2_7
+        ),
+        pam50 = tolower(pam50)
+    ) %>% 
+    dplyr::mutate(
+        pam50 = ifelse(is.na(pam50), "not_available", pam50),
+        number = as.character(number),
+        name_patient = paste(`group:ch1`, paste0("nb", number), timepoint, sep = "_")
+    ) %>% 
+    dplyr::rename(
+        group = `group:ch1`,
+        patient_nb = number
+    ) %>% data.frame %>% 
+    `rownames<-`(.$name_patient)
+```
+
+```{r}
+glimpse(final_col_data_drop)
+```
+
+After cleaning the clinical data, we can merge with the expression data
+and save using a summarized experiment object.
+
+```{r}
+match_names <- match(colnames(exprs_vals), final_col_data_drop$gsm_name)
+colnames(exprs_vals) <- final_col_data_drop[
+    match_names,
+    "name_patient"
+]
+```
+
+```{r}
+gse_ai <- SummarizedExperiment::SummarizedExperiment(
+    assays = list(
+        normalized_intensity = exprs_vals
+    ),
+    colData = final_col_data_drop[colnames(exprs_vals), ]
+)
+```
+
+```{r}
+saveRDS(gse_ai, "data/gse_ai.rds")
+```
+
+```{r}
+gse_ai <- readRDS("data/gse_ai.rds")
+```
+
+# PCA projection
+
+```{r}
+gg_color_hue <- function(n) {
+    hues = seq(15, 375, length = n + 1)
+    hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+avg_ranking <- function(dataset, expr_value, stable_genes){
+
+    available_stable_genes <- intersect(rownames(dataset), stable_genes)
+    
+    print(paste0(
+        "Total number of stable genes available: ", length(available_stable_genes)
+    ))
+    
+    values <- list(
+        avg_ranking = colMeans(assay(dataset, "rank")[available_stable_genes, ])/nrow(dataset),
+        avg_expression = colMeans(assay(dataset, expr_value)[available_stable_genes, ])
+    )
+    values$sd_ranking <- sd(values$avg_ranking)
+    values$sd_expression <- sd(values$avg_expression)
+    values
+}
+
+calculate_norm_ranks <- function(
+    dataset, 
+    avg_ranking_sds, 
+    expr_value
+){
+        
+    x <- dataset
+    
+    df <- sapply(
+        1:ncol(x),
+        function(i, x, avg_ranking_sds){
+            assay(x, expr_value)[,i]/avg_ranking_sds$avg_expression[i]
+        },
+        x = x,
+        avg_ranking_sds = avg_ranking_sds
+    ) %>% `colnames<-`(colnames(x)) %>%
+        `rownames<-`(rownames(x))
+    
+    assay(x, "avg_expression") <- df
+    
+    df <- sapply(
+        1:ncol(x),
+        function(i, x, avg_ranking_sds){
+            assay(x, "rank")[,i]/(avg_ranking_sds$avg_ranking[i]*nrow(x))
+        },
+        x = x,
+        avg_ranking_sds = avg_ranking_sds
+    ) %>% `colnames<-`(colnames(x)) %>%
+        `rownames<-`(rownames(x))
+    
+    assay(x, "avg_ranking") <- df
+    
+    x
+    
+}
+
+get_final_ranking_values <- function(
+    sum_exp, 
+    stable_genes, 
+    which_assay,
+    train_pca,
+    test_pca
+){
+    
+    avg_ranking_sds <- avg_ranking(sum_exp, which_assay, stable_genes)
+    
+    sum_exp <- calculate_norm_ranks(
+        dataset = sum_exp,
+        avg_ranking_sds = avg_ranking_sds,
+        expr_value = which_assay
+    )
+    
+    # add 0 to the genes that were not available before 
+    total_genes <- rownames(train_pca$loadings)
+    missing_genes <- setdiff(total_genes, rownames(sum_exp))
+    
+    final_ranking <- rbind(
+        assay(sum_exp, "avg_ranking") %>% as.matrix,
+        data.frame(
+                matrix(0, nrow = length(missing_genes), ncol = ncol(sum_exp)),
+                row.names = missing_genes
+        ) %>% `colnames<-`(colnames(gse_ai))
+    )
+    
+    pca_coords <- t(final_ranking[rownames(train_pca$loadings), ]) %*%
+        (train_pca$loadings %>% as.matrix)
+    
+    total_pca <- rbind(test_pca, pca_coords)
+    
+    list(
+        avg_ranking_sds = avg_ranking_sds,
+        sum_exp = sum_exp,
+        pca = total_pca
+    )
+    
+}
+```
+
+
+```{r}
+common_genes <- readRDS(
+    "../../results/pcr_ratio_seqdata/second_try/common_genes_0_8_threshold.rds"
+)
+stable_genes <- singscore::getStableGenes(n_stable = 50)
+stable_genes <- intersect(stable_genes, common_genes)
+stable_genes %>% length
+```
+
+```{r}
+train_pca_filtered <- readRDS(
+    "../../results/pcr_ratio_seqdata/second_try/train_pca_filtered.rds"
+)
+
+test_pca_filtered <- readRDS(
+    "../../results/pcr_ratio_seqdata/second_try/test_pca_filtered.rds"
+)
+```
+
+```{r}
+gse_ai <- gse_ai[intersect(rownames(gse_ai), rownames(train_pca_filtered$loadings)), ]
+assay(gse_ai, "rank") <- singscore::rankGenes(assay(gse_ai, "normalized_intensity"))
+```
+
+
+```{r}
+poetic_pca_rankings <- get_final_ranking_values(
+    gse_ai, 
+    stable_genes, 
+    "normalized_intensity",
+    train_pca_filtered,
+    test_pca_filtered
+)
+```
+
+```{r, fig.height = 6}
+par(mfrow=c(1,2))
+poetic_pca_rankings$avg_ranking_sds$avg_ranking %>% hist()
+poetic_pca_rankings$avg_ranking_sds$avg_expression %>% hist()
+par(mfrow=c(1,1))
+```
+
+The normalized ranks range from 0.50 to 0.65. 
+
+```{r, fig.height=6, message = FALSE}
+par(mfrow=c(1,1))
+a <- sapply(
+    list("poetic" = poetic_pca_rankings$sum_exp),
+    function(df) hist(assay(df, "avg_ranking")["ESR1", ])
+)
+par(mfrow=c(1,1))
+```
+
+These values are quite high, but they do make sense. 
+
+```{r}
+a <- sapply(
+    list("poetic" = poetic_pca_rankings$avg_ranking_sds), 
+    function(x){
+        c(x$sd_ranking, x$sd_expression) %>% data.frame %>%
+            `rownames<-`(c("ranking", "expression"))
+    }
+)
+a
+```
+
+We now continue and calculate the projection.
+
+```{r}
+merged_dataset_filtered <- readRDS(
+    "../../results/pcr_ratio_seqdata/second_try/merged_dataset_filtered.rds"
+)
+```
+
+```{r}
+col_data <- colData(poetic_pca_rankings$sum_exp) %>% data.frame
+merged_col_data_poetic <- colData(merged_dataset_filtered) %>% data.frame %>%
+    dplyr::select(cohort, pam50, name_patient) %>%
+    dplyr::bind_rows(
+        .,
+        col_data %>% data.frame %>%
+            dplyr::mutate(cohort = "poetic") %>%
+            dplyr::select(cohort, pam50, name_patient, timepoint, group, ki67)
+    ) %>%
+    dplyr::mutate(group = ifelse(is.na(group), "NA", group)) %>%
+    dplyr::mutate(treatment = as.character(timepoint)) %>% 
+    dplyr::mutate(timepoint = ifelse(is.na(timepoint), "NA", timepoint)) %>%
+    dplyr::mutate(pam50 = ifelse(is.na(pam50), "NA", pam50))
+
+plot_poetic <- merged_col_data_poetic %>% dplyr::inner_join(
+    .,
+    poetic_pca_rankings$pca %>% data.frame %>% tibble::rownames_to_column(
+        var = "name_patient"
+    ),
+    by = "name_patient"
+) %>% #dplyr::filter(pam50 != "NA") %>% 
+    ggplot2::ggplot(
+        aes(
+            x = PC3,
+            y = PC4, 
+            color = pam50,
+            fill = pam50,
+            alpha = ifelse(timepoint != "NA", 1, 0.8),
+            size = ifelse(timepoint != "NA", 3.1, 3),
+            shape = timepoint
+        )
+    ) + 
+    ggplot2::geom_point() +
+    ggplot2::scale_fill_manual(
+        values = c(
+            list("not_available" = "red"),
+            as.list(gg_color_hue(5) %>% `names<-`(c("basal", "her2", "luma", "lumb", "normal")))
+        )
+    ) +
+    ggplot2::scale_color_manual(
+        values = c(
+            list("not_available" = "red"),
+            as.list(gg_color_hue(5) %>% `names<-`(c("basal", "her2", "luma", "lumb", "normal")))
+        )
+    ) +
+    ggplot2::scale_alpha(guide = 'none') +
+    ggplot2::scale_size(range = c(1, 3), guide = "none") + 
+    ggplot2::labs(
+        title = paste0(
+            "PCA projection of the POETIC trial patients\nin baseline and after 2 weeks"
+        ),
+        shape = "Timepoint",
+        color = "PAM50"
+    ) + 
+    ggplot2::guides(
+        colour = ggplot2::guide_legend(override.aes = list(size=4)),
+        shape = ggplot2::guide_legend("Timepoint", override.aes = list(size=4)),
+        fill = "none"
+    ) + 
+        ggplot2::theme_bw(base_size = 10)
+
+plot_poetic
+```
+
+We now try to plot a bit different. We have the base plot which is just
+the PCA from TCGA, METABRIC and SCANB. Then we add the other points
+as we wish in another layer with another dataframe. 
+
+```{r}
+get_base_plot <- function(
+    merged_dataset, 
+    test_pca,
+    size_dots = 2,
+    alpha_val = 0.1,
+    size_legend = 4,
+    base_size = 10
+){
+    
+    colData(merged_dataset_filtered) %>% 
+        data.frame %>%
+        dplyr::select(cohort, pam50, name_patient) %>%
+        dplyr::inner_join(
+            .,
+            test_pca_filtered %>% 
+                data.frame %>% 
+                tibble::rownames_to_column(var = "name_patient"),
+            by = "name_patient"
+        ) %>%
+        ggplot2::ggplot(aes(x = PC3, y = PC4, color = pam50)) + 
+        ggplot2::geom_point(size = size_dots, alpha = alpha_val) +
+        ggplot2::scale_alpha(guide = 'none') +
+        ggplot2::labs(
+            color = "PAM50"
+        ) + 
+        ggplot2::guides(
+            colour = ggplot2::guide_legend(
+                override.aes = list(
+                    size = size_legend,
+                    alpha = 1
+                )
+            )
+        ) + 
+        ggplot2::theme_bw(base_size = base_size)
+}
+```
+
+```{r}
+size_dots <- 2
+alpha_val <- 0.1
+size_legend <- 4 
+base_size <- 10
+
+base_plot <- get_base_plot(
+    merged_dataset_filtered,
+    test_pca_filtered,
+    size_dots = size_dots,
+    alpha_val = alpha_val,
+    size_legend = size_legend,
+    base_size = base_size
+)
+
+base_plot
+```
+
+And we now add the samples from the POETIC trial.
+
+```{r}
+poetic_data <- colData(poetic_pca_rankings$sum_exp) %>% data.frame %>%
+    dplyr::mutate(
+        cohort = "poetic", 
+        pam50 = ifelse(is.na(pam50), "not_available", pam50)
+    ) %>%
+    dplyr::inner_join(
+        .,
+        poetic_pca_rankings$pca %>% 
+            data.frame %>% 
+            tibble::rownames_to_column(var = "name_patient"),
+        by = "name_patient"
+    )
+```
+
+```{r}
+base_plot + 
+    ggplot2::geom_point(
+        data = poetic_data,
+        aes(
+            shape = timepoint,
+            color = pam50,
+        ),
+        size = 3,
+        alpha = 0.5
+    ) +
+    ggplot2::scale_color_manual(
+        values = c(
+            list("not_available" = "red"),
+            as.list(
+                gg_color_hue(5) %>% 
+                    `names<-`(c("basal", "her2", "luma", "lumb", "normal"))
+            )
+        )
+    )
+```
+
+And now we plot by ki67 levels before any treatment.
+
+```{r}
+base_plot + 
+    ggplot2::geom_point(
+        data = poetic_data %>% dplyr::filter(timepoint == "baseline"),
+        aes(
+            shape = timepoint,
+            color = NA,
+            fill = ki67
+        ),
+        size = 3,
+        shape = 22
+    ) +
+    ggplot2::scale_fill_viridis_c(limits = c(0, 50), na.value = 50)
+```
+
+And we plot by responsiveness
+
+```{r}
+responder_plots <- base_plot + 
+    ggplot2::geom_point(
+        data = poetic_data %>% dplyr::filter(
+            timepoint == "baseline" & group == "treated"
+        ),
+        aes(
+            shape = timepoint,
+            color = NA,
+            fill = r_or_no_r_change_ki67_60_and_baseline_ki67_5_percent,
+            text = name_patient
+        ),
+        size = 3,
+        shape = 22
+    ) + 
+    ggplot2::labs(
+        fill = "Is responder?"
+    )
+
+responder_plots
+```
+
+```{r}
+plotly::ggplotly(responder_plots, tooltip = c("text", "x", "y"))
+```
+
+
+Based on this picture it seems that non responder are more on the far right, 
+whereas the responders are more on the left. Nonetheless, 
+we have responders and non responders next to each other. 
+
+We will now check the idea where we calculate the scores in the neighborhood
+and update the posterior distribution with the score from the patients. 
+
+The way we will do is using all the data at once, since this is equivalent 
+than doing for the background samples and then updating with the new sample.
+It is necessary to use a smaller neighborhood though, the other neighborhoods
+were too big and a single sample will not make a difference when calculating
+the estimates. 
+
+# Calculating estimates
+
+We will select responders and non responders that are close to each other
+and calculate separately their scores. 
+
+```{r}
+get_samples_neighborhood <- function(
+    x, y, radius_circle, test_pca, samples
+){
+    
+    test_pca <- as.matrix(test_pca[samples, ])
+    PC3 <- test_pca[, "PC3"]
+    PC4 <- test_pca[, "PC4"]
+    
+    distance_to_center <- ((PC3 - x)^2 + (PC4 - y)^2) 
+    samples_to_select <- (distance_to_center < radius_circle^2)
+    samples_in_neighborhood <- rownames(test_pca)[samples_to_select]
+    
+    list(
+        samples = samples_in_neighborhood,
+        distances = sqrt(distance_to_center[samples_to_select])
+    )
+    
+}
+
+merge_datasets <- function(og_exp, sum_exp){
+    
+    common_genes_dfs <- intersect(rownames(og_exp), rownames(sum_exp))
+    
+    cbind(
+        assay(og_exp, "avg_ranking")[common_genes_dfs, ],
+        assay(sum_exp, "avg_ranking")[common_genes_dfs, ] 
+    )
+    
+}
+
+get_gsva_scores <- function(
+    average_ranking, 
+    samples, 
+    pathways, 
+    nb_cores = 10
+){
+    
+    GSVA::gsva(
+        average_ranking[, samples], 
+        gset.idx.list = pathways,
+        parallel.sz = nb_cores
+    )
+    
+}
+
+average_neighboorhood_rstanarm <- function(
+    gsva_scores,
+    hallmarks_to_use
+){
+    
+    scores <- gsva_scores %>% dplyr::filter(hallmark %in% hallmarks_to_use)
+    
+    sapply(
+        unique(scores$hallmark),
+        function(hallmark_name, df_scores){
+            print(hallmark_name)
+            df_scores <- df_scores %>% dplyr::filter(hallmark == hallmark_name) 
+            print(dim(df_scores))
+            weights <- dplyr::pull(df_scores, "weights")
+            
+            rstanarm::stan_lmer(
+                data = df_scores,
+                formula = "gsva_scores_all ~ 1 + (1|technology)", 
+                chains = 4,
+                cores = 4,
+                weights = weights, 
+                adapt_delta = 0.999
+            )   
+            
+        },
+        df_scores = scores,
+        USE.NAMES = TRUE,
+        simplify = FALSE
+    )
+}
+```
+
+```{r}
+hallmarks <- clusterProfiler::read.gmt(
+    "../../../../brisken-lab/BioRepo/MSigDB/h.all.v6.2.symbols.gmt"
+)
+hallmarks <- sapply(
+    unique(hallmarks$term) %>% as.character,
+    function(x, df){df %>% dplyr::filter(term == x) %>% dplyr::pull(gene)},
+    df = hallmarks,
+    USE.NAMES = TRUE,
+    simplify = FALSE
+)
+```
+
+```{r}
+merged_dataset <- readRDS(
+    "../../results/files/merged_dataset.rds"
+)
+```
+
+```{r}
+df_for_gsva <- merge_datasets(
+    og_exp = merged_dataset,
+    sum_exp = poetic_pca_rankings$sum_exp
+)
+```
+
+```{r}
+x <- 0.078
+y <- -0.545
+radius_circle <- 0.5
+sample_to_add <- "treated_nb63_baseline"
+
+samples_in_cohort <- colnames(merged_dataset_filtered)
+samples_and_distances <- get_samples_neighborhood(
+    x = x,
+    y = y, 
+    radius_circle = radius_circle, 
+    test_pca = test_pca_filtered, 
+    samples = samples_in_cohort
+)
+
+samples <- c(sample_to_add, samples_and_distances$samples)
+
+alpha <- 4
+df_weights <- data.frame(
+    name_patient = samples,
+    weights = c(1, exp(-alpha*samples_and_distances$distances)),
+    distances = c(0, samples_and_distances$distances)
+)
+```
+
+```{r, warning = FALSE}
+gsva_scores <- get_gsva_scores(
+    average_ranking = df_for_gsva,
+    samples = c(sample_to_add, samples_in_cohort),
+    pathways = hallmarks, 
+    nb_cores = 28
+)
+```
+
+Before we move on, we compare the results with the previously calculate scores.
+
+```{r}
+gsva_scores_all <- readRDS(
+    "../../results/pcr_ratio_seqdata/second_try/gsva_scores_all.rds"
+)
+```
+
+
+```{r}
+plot(
+    gsva_scores_all["HALLMARK_ESTROGEN_RESPONSE_EARLY", samples_and_distances$samples],
+    gsva_scores["HALLMARK_ESTROGEN_RESPONSE_EARLY", samples_and_distances$samples]
+)
+abline(a = 0, b = 1)
+```
+
+They are highly correlated but the scores are very different. 
+
+We can now calculate the posterior distribution of our sample. 
+```{r, message = FALSE, echo = FALSE}
+technologies <- list(
+    "scanb" = "rnaseq",
+    "tcga" = "rnaseq",
+    "metabric" = "microarray",
+    "poetic" = "microarray"
+)
+gsva_scores_long <- gsva_scores %>% t %>% data.frame %>% 
+    tibble::rownames_to_column(var = "name_patient") %>%
+    dplyr::inner_join(
+        .,
+        merged_col_data_poetic,
+        by = "name_patient"
+    ) %>%
+    dplyr::inner_join(
+        ., 
+        df_weights,
+        by = "name_patient"
+    ) %>%
+    tidyr::pivot_longer(
+        cols = names(hallmarks),
+        names_to = "hallmark",
+        values_to = "gsva_scores_all"
+    )
+gsva_scores_long$technology <- technologies[gsva_scores_long$cohort] %>% unlist
+
+hallmarks_to_use <- c(
+    "HALLMARK_ESTROGEN_RESPONSE_EARLY",
+    "HALLMARK_E2F_TARGETS",
+    "HALLMARK_P53_PATHWAY",
+    "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+    "HALLMARK_ANDROGEN_RESPONSE",
+    "HALLMARK_TGF_BETA_SIGNALING"
+)
+
+average_samples <- average_neighboorhood_rstanarm(
+    gsva_scores_long,
+    hallmarks_to_use = hallmarks_to_use
+)
+```
+
+We now calculate a normalized average score that takes into account the 
+technology into account. For this, we'll use rstanarm and calculate the
+average of each hallmark by using a multilevel model on the techonology.
+The formula will 0 + hallmark + (0 + hallmark|techonology). This will have two levels:
+RNA-seq and microarray.
+
+```{r}
+print(average_samples$HALLMARK_ESTROGEN_RESPONSE_EARLY)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+final_coef <- average_samples$HALLMARK_E2F_TARGETS %>%
+    tidybayes::spread_draws(`(Intercept)`)
+
+hist(final_coef$`(Intercept)`)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+final_coef <- average_samples$HALLMARK_TGF_BETA_SIGNALING %>%
+    tidybayes::spread_draws(`(Intercept)`)
+
+hist(final_coef$`(Intercept)`)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+final_coef <- average_samples$HALLMARK_ESTROGEN_RESPONSE_EARLY %>%
+    tidybayes::spread_draws(`(Intercept)`)
+
+hist(final_coef$`(Intercept)`)
+```
+
+```{r}
+names_hallmarks <- list(
+    "Estrogen response early",
+    "E2F targets",
+    "P53 pathway",
+    "EMT",
+    "Androgen response",
+    "TGFb signaling"
+)
+names(names_hallmarks) <- hallmarks_to_use
+base_size <- 15
+plots_estimates <- function(models, patient_name){
+    
+    tidy_draws <- lapply(
+        models, 
+        function(x) x %>% tidybayes::spread_draws(`(Intercept)`)
+    ) %>% dplyr::bind_rows(
+        .id = "hallmark_names"
+    ) 
+    
+    tidy_draws$hallmark_names <- names_hallmarks[tidy_draws$hallmark_names] %>%
+        as.character
+    
+    tidy_draws %>% 
+    ggplot2::ggplot(
+        aes(x = `(Intercept)`)
+    ) + 
+        ggplot2::geom_vline(xintercept = 0, linetype = "dashed") +
+        tidybayes::stat_dotsinterval(
+            quantiles = 100,
+            size = 3
+        ) + 
+        ggplot2::facet_wrap(~hallmark_names, ncol = 3) +
+        ggplot2::labs(
+            title = paste0(
+                "Distribution of average scores\n",
+                "weighted towards patient ", patient_name 
+            ),
+            y = "",
+            x = "Average score"
+        ) +
+        ggplot2::coord_cartesian(xlim = c(-0.8,0.8)) + 
+        ggplot2::theme_bw(base_size = base_size)
+}
+```
+
+```{r}
+plots_estimates_patient <- plots_estimates(
+    average_samples,
+    sample_to_add
+)
+```
+
+```{r}
+plots_estimates_patient
+```
+
+And for another patient that is considered a non responder:
+```{r}
+#x <- 0.078
+#y <- -0.545
+x <- 0.175
+y <- -0.531
+radius_circle <- 0.5
+#sample_to_add <- "treated_nb63_baseline"
+sample_to_add_n <- "treated_nb236_baseline"
+
+samples_in_cohort <- colnames(merged_dataset_filtered)
+samples_and_distances <- get_samples_neighborhood(
+    x = x,
+    y = y, 
+    radius_circle = radius_circle, 
+    test_pca = test_pca_filtered, 
+    samples = samples_in_cohort
+)
+
+samples <- c(sample_to_add_n, samples_and_distances$samples)
+
+alpha <- 4
+df_weights <- data.frame(
+    name_patient = samples,
+    weights = c(1, exp(-alpha*samples_and_distances$distances)),
+    distances = c(0, samples_and_distances$distances)
+)
+```
+
+```{r, warning = FALSE}
+gsva_scores_n <- get_gsva_scores(
+    average_ranking = df_for_gsva,
+    samples = samples,
+    pathways = hallmarks, 
+    nb_cores = 28
+)
+```
+
+```{r}
+plot(
+    gsva_scores_all["HALLMARK_ESTROGEN_RESPONSE_EARLY", samples_and_distances$samples],
+    gsva_scores_n["HALLMARK_ESTROGEN_RESPONSE_EARLY", samples_and_distances$samples]
+)
+abline(a = 0, b = 1)
+```
+
+We can now calculate the posterior distribution of our sample. 
+```{r, message = FALSE, echo = FALSE}
+gsva_scores_long_n <- gsva_scores_n %>% t %>% data.frame %>% 
+    tibble::rownames_to_column(var = "name_patient") %>%
+    dplyr::inner_join(
+        .,
+        merged_col_data_poetic,
+        by = "name_patient"
+    ) %>%
+    dplyr::inner_join(
+        ., 
+        df_weights,
+        by = "name_patient"
+    ) %>%
+    tidyr::pivot_longer(
+        cols = names(hallmarks),
+        names_to = "hallmark",
+        values_to = "gsva_scores_all"
+    )
+gsva_scores_long_n$technology <- technologies[gsva_scores_long_n$cohort] %>% unlist
+
+hallmarks_to_use <- c(
+    "HALLMARK_ESTROGEN_RESPONSE_EARLY",
+    "HALLMARK_E2F_TARGETS",
+    "HALLMARK_P53_PATHWAY",
+    "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+    "HALLMARK_ANDROGEN_RESPONSE",
+    "HALLMARK_TGF_BETA_SIGNALING"
+)
+
+average_samples_n <- average_neighboorhood_rstanarm(
+    gsva_scores_long_n,
+    hallmarks_to_use = hallmarks_to_use
+)
+```
+
+We now calculate a normalized average score that takes into account the 
+technology into account. For this, we'll use rstanarm and calculate the
+average of each hallmark by using a multilevel model on the techonology.
+The formula will 0 + hallmark + (0 + hallmark|techonology). This will have two levels:
+RNA-seq and microarray.
+
+```{r}
+print(average_samples_n$HALLMARK_ESTROGEN_RESPONSE_EARLY)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+final_coef <- average_samples_n$HALLMARK_E2F_TARGETS %>%
+    tidybayes::spread_draws(`(Intercept)`)
+
+hist(final_coef$`(Intercept)`)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+final_coef <- average_samples_n$HALLMARK_TGF_BETA_SIGNALING %>%
+    tidybayes::spread_draws(`(Intercept)`)
+
+hist(final_coef$`(Intercept)`)
+```
+
+```{r}
+plots_estimates_patient_n <- plots_estimates(
+    average_samples_n,
+    sample_to_add
+)
+```
+
+```{r}
+plots_estimates_patient_n
+```
+
+```{r}
+plots_estimates_patient
+```
+
+And when we plot both results together:
+
+```{r}
+models <- list(
+    average_samples,
+    average_samples_n
+) %>% `names<-`(c(sample_to_add, sample_to_add_n))
+
+plots_comparison_estimates <- function(models){
+    
+    tidy_draws <- lapply(
+        models, 
+        function(model){
+            lapply(
+                model,
+                function(x) x %>% tidybayes::spread_draws(`(Intercept)`)
+            ) %>% dplyr::bind_rows(
+                .id = "hallmark_names"
+            )
+        } 
+    ) %>% dplyr::bind_rows(
+        .id = "patient" 
+    ) 
+    
+    tidy_draws$hallmark_names <- names_hallmarks[tidy_draws$hallmark_names] %>%
+        as.character
+    
+    tidy_draws %>% 
+    ggplot2::ggplot(
+        aes(x = `(Intercept)`, fill = patient)
+    ) + 
+        ggplot2::geom_vline(xintercept = 0, linetype = "dashed") +
+        ggplot2::geom_density(alpha = 0.5) + 
+        ggplot2::facet_wrap(~hallmark_names, ncol = 3) +
+        ggplot2::labs(
+            title = paste0(
+                "Distribution of average scores\n",
+                "for two patients:\n",
+                names(models)[1], " and ", names(models)[2]
+            ),
+            y = "Density",
+            x = "Average score"
+        ) +
+        ggplot2::coord_cartesian(xlim = c(-0.8,0.8)) + 
+        ggplot2::theme_bw(base_size = base_size) + 
+        ggplot2::theme(legend.position="bottom")
+}
+
+plots_comparison_estimates(models)
+```
+
+```{r}
+plots_comparison_estimates_bivar <- function(models, pathway_1, pathway_2){
+    
+    tidy_draws <- lapply(
+        models, 
+        function(model){
+            lapply(
+                model,
+                function(x) x %>% tidybayes::spread_draws(`(Intercept)`)
+            ) %>% dplyr::bind_rows(
+                .id = "hallmark_names"
+            )
+        } 
+    ) %>% dplyr::bind_rows(
+        .id = "patient" 
+    ) 
+    
+    tidy_draws <- tidy_draws %>% tidyr::pivot_wider(
+        names_from = "hallmark_names",
+        values_from = "(Intercept)"
+    )
+    
+    tidy_draws %>% 
+    ggplot2::ggplot(
+        aes_string(x = pathway_1, y = pathway_2, color = "patient")
+    ) + 
+        ggplot2::geom_point(alpha = 0.3) + 
+        ggplot2::theme_bw(base_size = base_size) + 
+        ggplot2::theme(legend.position="bottom")
+}
+
+plots_comparison_estimates_bivar(
+    models, 
+    "HALLMARK_ESTROGEN_RESPONSE_EARLY", 
+    "HALLMARK_E2F_TARGETS"
+)
+```
+```
+
