@@ -8,11 +8,10 @@ things organized.
 
 ```{r, message=FALSE}
 library(DESeq2)
-library(TCGAbiolinks)
 library(GEOquery)
+library(SummarizedExperiment)
 
 library(dplyr)
-library(ggplot2)
 ```
 
 ## Introduction

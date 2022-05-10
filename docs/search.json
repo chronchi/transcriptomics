@@ -39,21 +39,35 @@
     "href": "metabric.html",
     "title": "2  METABRIC",
     "section": "",
-    "text": "First load the packages that will be used along the cleaning process. Always do this at the beginning of your script to make things organized.\n\nlibrary(dplyr)\nlibrary(ggplot2)\nlibrary(TCGAbiolinks)\nlibrary(singscore)\nlibrary(GEOquery)\n\nlibrary(SummarizedExperiment)"
+    "text": "First load the packages that will be used along the cleaning process. Always do this at the beginning of your script to make things organized.\n\nlibrary(DESeq2)\nlibrary(GEOquery)\nlibrary(SummarizedExperiment)\n\nlibrary(dplyr)"
   },
   {
     "objectID": "metabric.html#introduction",
     "href": "metabric.html#introduction",
     "title": "2  METABRIC",
     "section": "2.2 Introduction",
-    "text": "2.2 Introduction\nTo download the clinical data and expression levels from the METABRIC cohort go to cbioportal and select the respective cohort (METABRIC): https://www.cbioportal.org/\nHere we will load and format the metabric data in the same way as SCAN-B and the AI dataset, so it is standardized and better to use in future analysis. For this, we use the summarized experiment object to store expression data and clinical information.\nLoading gene expression levels. ::: {.cell}\nexpression_data <- read.csv(\n  \"Data/20210713_metabric/data_mRNA_median_all_sample_Zscores.txt\",\n  sep = \"\\t\",\n  check.names = FALSE\n)\n\ndim(expression_data)\n:::\nWe note that the first two columns correspond to HUGO symbol and ENTREZ ID.\nSince genes were znormalized, we select the first appearance in the list of genes that are duplicated.\n\nexpression_data <- expression_data[!duplicated(expression_data$Hugo_Symbol), ]\n\nLoad now clinical data.\n\nclinical_data <- read.csv(\n  \"Data/20210713_metabric/data_clinical_patient.txt\",\n  sep = \"\\t\",\n  comment.char = \"#\"\n)\n\nglimpse(clinical_data)\n\nWe see that there are over 2500 rows, meaning that we have more patients with clinical data than expression levels. Let us now select patients that have expression levels.\n\nlength(unique(clinical_data$PATIENT_ID)) == nrow(clinical_data)\n\nWe see that each row has a unique identifier, the patient ID, so we set this as a rowname.\n\nrownames(clinical_data) <- clinical_data$PATIENT_ID\n\nAnd we check if all patients from expression data have clinical data.\n\nlength(intersect(clinical_data$PATIENT_ID, colnames(expression_data[, -c(1,2)]))) ==\n  ncol(expression_data)-2\n\nIndeed it has, therefore we can just subselect clinical data and create the file like TCGA and SCAN-B.\n\nclinical_data <- clinical_data[colnames(expression_data[, -c(1,2)]), ]\nrownames(expression_data) <- expression_data$Hugo_Symbol\nrow_ranges <- expression_data[, c(1,2)]\nexpression_data <- expression_data[, -c(1,2)]\n\n\nmetabric_intensity_values <- read.delim(\n    \"Data/20210713_metabric/data_expression_median.txt\",\n    sep = \"\\t\",\n    header = TRUE\n) %>% dplyr::mutate(Entrez_Gene_Id = NULL) %>%\n    `colnames<-`(stringr::str_replace_all(colnames(.), stringr::fixed(\".\"), \"-\"))\n\nBefore we just average the duplicated genes median intensity.\n\nduplicated_genes <- metabric_intensity_values$Hugo_Symbol[duplicated(metabric_intensity_values$Hugo_Symbol)]\nmedian_genes <- sapply(\n    metabric_intensity_values$Hugo_Symbol[\n        duplicated(metabric_intensity_values$Hugo_Symbol)\n    ] %>% unique,\n    function(gene, df){\n        df %>% dplyr::filter(Hugo_Symbol == gene) %>%\n            dplyr::mutate(Hugo_Symbol = NULL) %>%\n            as.matrix(.) %>%\n            MatrixGenerics::colMedians(.)\n    },\n    df = metabric_intensity_values\n)\n\nmetabric_exp <- metabric_intensity_values\nmetabric_exp <- metabric_exp[!duplicated(metabric_exp$Hugo_Symbol), ]\nrownames(metabric_exp) <- metabric_exp$Hugo_Symbol\nmetabric_exp$Hugo_Symbol <- NULL\nmetabric_exp[colnames(median_genes), ] <- median_genes %>% t\n\n\n# add new clinical data to the summarized experiment object.\nmetabric <- SummarizedExperiment::SummarizedExperiment(\n    assays = list(\n        zscores = expression_data, \n        median_intensity = metabric_exp[\n            rownames(expression_data), \n            colnames(expression_data)\n        ]\n    ), \n    colData = clinical_data\n)\n\nAdd ranking of the genes. ::: {.cell}\nassay(metabric, \"rank\") <- singscore::rankGenes(assay(metabric, \"median_intensity\"))\n:::\nLoad also the median intensity values as well.\n\n# save the final dataset\nsaveRDS(\n    metabric, \n    file = file.path(\"Data/20210713_metabric/metabric_filtered.rds\")\n)\n\n\nwrite.csv(x = row_ranges, file = \"Data/20210713_metabric/HUGO_ENTREZ.csv\", row.names = FALSE)"
+    "text": "2.2 Introduction\nTo download the clinical data and expression levels from the METABRIC cohort go to cbioportal and select the respective cohort (METABRIC): https://www.cbioportal.org/\nHere we will load and format the metabric data in the same way as SCAN-B and the AI dataset, so it is standardized and better to use in future analysis. For this, we use the summarized experiment object to store expression data and clinical information."
+  },
+  {
+    "objectID": "metabric.html#downloading-data",
+    "href": "metabric.html#downloading-data",
+    "title": "2  METABRIC",
+    "section": "2.3 Downloading data",
+    "text": "2.3 Downloading data\nLoading gene expression levels.\n\nexpression_data <- read.csv(\n    \"data_mrna_agilent_microarray.txt\",\n    sep = \"\\t\",\n    check.names = FALSE\n) %>% dplyr::mutate(Entrez_Gene_Id = NULL) %>%\n    `colnames<-`(stringr::str_replace_all(colnames(.), stringr::fixed(\".\"), \"-\"))\n\ndim(expression_data)\n\nWe note that the first two columns correspond to HUGO symbol and ENTREZ ID.\nLoad now clinical data.\n\nclinical_data <- read.csv(\n    \"data_clinical_patient.txt\",\n    sep = \"\\t\",\n    comment.char = \"#\"\n)\n\nglimpse(clinical_data)"
+  },
+  {
+    "objectID": "metabric.html#cleaning-and-integrating",
+    "href": "metabric.html#cleaning-and-integrating",
+    "title": "2  METABRIC",
+    "section": "2.4 Cleaning and integrating",
+    "text": "2.4 Cleaning and integrating\nWe see that there are over 2500 rows, meaning that we have more patients with clinical data than expression levels. Let us now select patients that have expression levels.\n\nlength(unique(clinical_data$PATIENT_ID)) == nrow(clinical_data)\n\nWe see that each row has a unique identifier, the patient ID, so we set this as a rowname.\n\nrownames(clinical_data) <- clinical_data$PATIENT_ID\n\nAnd we check if all patients from expression data have clinical data.\n\nlength(\n    intersect(\n        clinical_data$PATIENT_ID, \n        colnames(expression_data[, -c(1,2)])\n    )\n) == ncol(expression_data)-2\n\nIndeed it has, therefore we can just subselect clinical data.\n\nduplicated_genes <- expression_data$Hugo_Symbol[\n    duplicated(expression_data$Hugo_Symbol)\n]\n\nhugo_symbols_duplicated <- expression_data$Hugo_Symbol[\n    duplicated(expression_data$Hugo_Symbol)\n] %>% unique\n\nmedian_genes <- sapply(\n    hugo_symbols_duplicated,\n    function(gene, df){\n        df %>% dplyr::filter(Hugo_Symbol == gene) %>%\n            dplyr::mutate(Hugo_Symbol = NULL) %>%\n            as.matrix(.) %>%\n            MatrixGenerics::colMedians(.)\n    },\n    df = expression_data\n)\n\nmetabric_exp <- expression_data[!duplicated(expression_data$Hugo_Symbol), ]\nrownames(metabric_exp) <- expression_data$Hugo_Symbol[\n    !duplicated(expression_data$Hugo_Symbol)\n]\nmetabric_exp$Hugo_Symbol <- NULL\nmetabric_exp[colnames(median_genes), ] <- median_genes %>% t\n\n\nclinical_data <- clinical_data[\n    intersect(colnames(metabric_exp), rownames(clinical_data)), \n]\n\nBefore we just average the duplicated genes median intensity.\n\n# add new clinical data to the summarized experiment object.\nmetabric <- SummarizedExperiment::SummarizedExperiment(\n    assays = list(\n        median_intensity = metabric_exp[, rownames(clinical_data)]\n    ), \n    colData = clinical_data\n)\n\nAnd we can finally save the RDS file to load it up faster later.\n\n# save the final dataset\nsaveRDS(\n    metabric, \n    file = file.path(\"metabric_filtered.rds\")\n)"
   },
   {
     "objectID": "scanb.html",
     "href": "scanb.html",
     "title": "3  SCANB",
     "section": "",
-    "text": "First load the packages that will be used along the cleaning process. Always do this at the beginning of your script to make things organized.\n\nlibrary(DESeq2)\nlibrary(TCGAbiolinks)\nlibrary(GEOquery)\n\nlibrary(dplyr)\nlibrary(ggplot2)"
+    "text": "First load the packages that will be used along the cleaning process. Always do this at the beginning of your script to make things organized.\n\nlibrary(DESeq2)\nlibrary(GEOquery)\nlibrary(SummarizedExperiment)\n\nlibrary(dplyr)"
   },
   {
     "objectID": "scanb.html#introduction",
@@ -75,5 +89,26 @@
     "title": "3  SCANB",
     "section": "3.4 Cleaning and integrating",
     "text": "3.4 Cleaning and integrating\nWe remove the samples with the replicate in the name, as these won’t be necessary for the analysis.\n\ngene_no_replicates <- gene_expression_levels[\n    , \n    !grepl(colnames(gene_expression_levels), pattern = \"repl\")\n]\n\n# select only patients that have clinical information\ngene_no_replicates <- gene_no_replicates[\n    , \n    intersect(colnames(gene_no_replicates), pheno_data$title)\n]\n\nAnd then we need to match the columns from the clinical data with the gene expression levels.\n\n# subselect clinical data and change row names to match column names\n# from expression levels. We will create then a summarized experiment\n# table. \npheno_data_sub <- pheno_data[\n    match(colnames(gene_no_replicates), pheno_data$title), \n]\n\n# check if expression levels number of columns and number of rows have the\n# same patients\nlength(intersect(colnames(gene_no_replicates), pheno_data_sub$title)) ==\n  ncol(gene_no_replicates)\n\nrownames(pheno_data_sub) <- pheno_data_sub$title\n\nAnd now we can merge the downloaded clinical data.\n\n# first we will fetch the pheno data downloaded from the scan-b mutation\n# explorer\nscanb_id <- sapply(\n    pheno_data_sub[, \"scan-b external id:ch1\"], \n    stringr::str_extract,\n    pattern = \"S.*\\\\.g\"\n)\n\npheno_data_sub$scanb_id <- scanb_id\n\n# subselect patients that are in both datasets\nscanb_both <- intersect(scanb_id, sweden_clin_data$SAMPLE)\n\n# subselect now \npheno_data_subsub <- pheno_data_sub %>% \n  dplyr::filter(scanb_id %in% scanb_both)\n\ndim(pheno_data_subsub)\n\n\n# we now subselect the rows from sweden_clin_data using the scanb_id\nsweden_clin_data_sub <- sweden_clin_data %>% \n    dplyr::filter(SAMPLE %in% scanb_both)\n\n# add filename F* as a column name\nname_expression <- sapply(\n    sweden_clin_data_sub$SAMPLE,\n    function(x){\n        pheno_data_subsub[which(x == pheno_data_subsub$scanb_id), \"title\"]\n    }\n)\n\nlength(unique(name_expression)) == nrow(pheno_data_subsub)\n\n\nsweden_clin_data_sub$name_expression <- name_expression\nrownames(sweden_clin_data_sub) <- sweden_clin_data_sub$name_expression\n\nAnd as with the AI dataset, we create a SummarizedExperiment object to save the data and use it later in the downstream analysis.\n\n# add new clinical data to the summarized experiment object.\nsweden_df <- SummarizedExperiment::SummarizedExperiment(\n    assays = list(logFPKM = gene_no_replicates[, rownames(sweden_clin_data_sub)]), \n    colData = sweden_clin_data_sub\n)\n\n# save the final dataset\nsaveRDS(\n    sweden_df, \n    file = file.path(\"data/sweden_df_filtered.rds\")\n)"
+  },
+  {
+    "objectID": "resources.html",
+    "href": "resources.html",
+    "title": "4  Further resources",
+    "section": "",
+    "text": "Here I list some resources you can check to perform your analysis."
+  },
+  {
+    "objectID": "resources.html#pca",
+    "href": "resources.html#pca",
+    "title": "4  Further resources",
+    "section": "4.1 PCA",
+    "text": "4.1 PCA\nTo do PCA on R I highly recommend to use the package PCAtools from Kevin Blighe:\n\nhttps://bioconductor.org/packages/release/bioc/html/PCAtools.html\n\nWith this package one can use metadata to customize the PCA biplots."
+  },
+  {
+    "objectID": "resources.html#survival-analysis",
+    "href": "resources.html#survival-analysis",
+    "title": "4  Further resources",
+    "section": "4.2 Survival analysis",
+    "text": "4.2 Survival analysis\nA very good starter to survival analysis can be found in this page:\n\nhttp://www.sthda.com/english/wiki/survival-analysis-basics\n\nThey describe the basics of survival analysis and how to use the packages survival and survminer.\nAnd in the next post, they explain the cox proportional hazards model.\n\nhttp://www.sthda.com/english/wiki/cox-proportional-hazards-model\n\nHighly recommend to use this when doing survival analysis, as you get estimates for your comparisons and confidence intervals."
   }
 ]

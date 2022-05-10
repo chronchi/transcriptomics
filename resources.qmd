@@ -1,0 +1,29 @@
+# Further resources
+
+Here I list some resources you can check to perform your analysis.
+
+## PCA
+
+To do PCA on R I highly recommend to use the package 
+`PCAtools` from Kevin Blighe: 
+
+> https://bioconductor.org/packages/release/bioc/html/PCAtools.html
+
+With this package one can use metadata to customize the PCA biplots. 
+
+## Survival analysis
+
+A very good starter to survival analysis can be found in this page:
+
+> http://www.sthda.com/english/wiki/survival-analysis-basics
+
+They describe the basics of survival analysis and how to use the
+packages `survival` and `survminer`.
+
+And in the next post, they explain the cox proportional hazards model. 
+
+> http://www.sthda.com/english/wiki/cox-proportional-hazards-model
+
+Highly recommend to use this when doing survival analysis, as you get
+estimates for your comparisons and confidence intervals.
+ 

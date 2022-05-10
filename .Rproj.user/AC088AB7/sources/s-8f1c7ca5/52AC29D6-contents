@@ -25,6 +25,16 @@ metabric <- readRDS("../../../../BioRepo/Data/20210713_metabric/metabric_filtere
 scanb <- readRDS("~/Documents/brisken-lab/BioRepo/Data/20170309_GSE96058/sweden_df_filtered.rds")
 ```
 
+```{r}
+common_genes <- intersect(rownames(metabric), rownames(scanb))
+scanb <- scanb[common_genes,]
+metabric <- metabric[common_genes]
+
+metabric_rank <- apply(assay(metabric,"median_intensity"), 2, rank)
+scanb_rank <- apply(assay(scanb,"logFPKM"), 2, rank)
+```
+
+
 ## Loading the gene list
 
 ```{r}
@@ -57,77 +67,145 @@ ilc_metabric <- colData(metabric) %>% data.frame %>%
 Out of the 60 genes, 54 are available. We will use those instead. 
 
 ```{r}
-available_genes <- intersect(metabric %>% rownames, gene_list$symbol)
+available_genes <- intersect(metabric_rank %>% rownames, gene_list$symbol)
 ```
 
 ```{r}
 ilc_metabric <- metabric[
     available_genes, 
-    intersect(ilc_metabric$PATIENT_ID, classes_metabric$name_patient)
+    rownames(ilc_metabric)
 ]
 ```
 
 ```{r}
+set.seed(92183)
 metabric_ilc_kmeans <- stats::kmeans(
-    t(assay(ilc_metabric, "rank")/nrow(metabric)), 
+    t(metabric_rank[rownames(ilc_metabric), colnames(ilc_metabric)]/nrow(metabric)), 
     centers = 3
 )
 
 metabric_ilc_kmeans$cluster %>% table
 ```
 
-Let us check cluster 1 and compare to the baseline.
-
 ```{r}
-classes_metabric %>% dplyr::filter(
-    name_patient %in% colnames(ilc_metabric)
-) %>% janitor::tabyl(subtype)
+predict_kmeans <- function(object, newdata){
+    centers <- object$centers
+    n_centers <- nrow(centers)
+    dist_mat <- as.matrix(dist(rbind(centers, newdata)))
+    dist_mat <- dist_mat[-seq(n_centers), seq(n_centers)]
+    max.col(-dist_mat)
+}
 ```
 
-We now do a PCA and color by the clusters.
+And now we calculate for scanb as well.
 
 ```{r}
-pca <- PCAtools::pca(
-    assay(ilc_metabric, "median_intensity"),
-    metadata = dplyr::bind_cols(
-        classes_metabric %>% dplyr::mutate(PATIENT_ID = name_patient) %>%
-            dplyr::filter(name_patient %in% colnames(ilc_metabric)),
-        colData(ilc_metabric) %>% data.frame %>% 
-            dplyr::mutate(cluster = as.character(
-                metabric_ilc_kmeans$cluster[colnames(ilc_metabric)]
-            )),
-        by = "PATIENT_ID"
-    )
+ilc_scanb <- colData(scanb) %>% data.frame %>% dplyr::filter(
+    Histological_Type == "Lobular"
+)
+ilc_scanb <- scanb[
+    rownames(ilc_metabric), 
+    ilc_scanb$name_expression
+]
+```
+
+```{r}
+classes_ilc_scanb <- predict_kmeans(
+    metabric_ilc_kmeans,
+    t(scanb_rank[rownames(ilc_scanb), colnames(ilc_scanb)]/nrow(scanb))
 )
 ```
 
 ```{r}
-PCAtools::biplot(
-    pca,
-    colby = "subtype",
-    shape = "cluster",
+classes_ilc_scanb %>% table
+```
+
+And doing the PCA for the scanb samples.
+
+```{r}
+pca_scanb <- PCAtools::pca(
+    assay(ilc_scanb, "logFPKM"),
+    metadata = colData(ilc_scanb) %>% data.frame %>% 
+            dplyr::mutate(
+                cluster = as.character(
+                    classes_ilc_scanb
+                )
+            )
+    )
+```
+
+```{r}
+pca_biplot_scanb_from_metabric <- PCAtools::biplot(
+    pca_scanb,
+    colby = "cluster",
     lab = NULL, 
     legendPosition = "right",
     x = "PC1",
-    y = "PC2"
+    y = "PC2",
+    title = "Cohort: SCANB\nUsing centers from kmeans done on METABRIC"
+)
+pca_biplot_scanb_from_metabric
+```
+
+And if we do k-means once again for scanb instead. 
+
+```{r}
+scanb_ilc_kmeans <- stats::kmeans(
+    t(scanb_rank[rownames(ilc_scanb), colnames(ilc_scanb)]/nrow(scanb)), 
+    centers = 3
 )
 ```
 
 ```{r}
-#| fig-width: 16
-#| fig-height: 10
+pca_scanb$metadata$cluster_kmeans <- as.character(
+    scanb_ilc_kmeans$cluster[rownames(pca_scanb$metadata)]
+)
+```
 
-pairsplot_pca <- PCAtools::pairsplot(
-    pca,
-    colby = "subtype",
-    shape = "cluster",
+
+```{r}
+pca_biplot_kmeans <- PCAtools::biplot(
+    pca_scanb,
+    colby = "cluster_kmeans",
     lab = NULL, 
-    legendPosition = "right", 
-    components = paste0("PC", 1:5), 
-    pointSize = 3
+    legendPosition = "right",
+    x = "PC1",
+    y = "PC2",
+    title = "Cohort: SCANB\nUsing kmeans directly on SCANB"
 )
 
-pairsplot_pca
+pca_biplot_kmeans
+```
+
+```{r, fig.width=16}
+cowplot::plot_grid(
+    pca_biplot_scanb_from_metabric,
+    pca_biplot_kmeans
+)
+```
+
+The clusters seem to match overall. 
+
+
+## Saving the results
+
+We now save into an excel file the classes. 
+
+```{r}
+clusters <- list()
+clusters$metabric <- data.frame(
+    name_patient = names(metabric_ilc_kmeans$cluster),
+    cluster = metabric_ilc_kmeans$cluster
+)
+clusters$scanb <- data.frame(
+    name_patient = colnames(ilc_scanb),
+    cluster = classes_ilc_scanb
+)
+```
+
+
+```{r}
+writexl::write_xlsx(x = clusters, path = "../data/clusters.xlsx")
 ```
 
 

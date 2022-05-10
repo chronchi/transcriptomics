@@ -1,5 +1,0 @@
-"0","ilc_metabric <- metabric[gene_list$symbol, ilc_metabric$PATIENT_ID]
-"
-"2","Error in .SummarizedExperiment.charbound(i, rownames(x), fmt) : 
-  <SummarizedExperiment>[i,] index out of bounds: ADH1B CAPN6 ... LOC339524 SLC19A3
-"

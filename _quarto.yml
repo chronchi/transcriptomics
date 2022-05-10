@@ -10,6 +10,7 @@ book:
     - ai.qmd
     - metabric.qmd
     - scanb.qmd
+    - resources.qmd
 
 bibliography: references.bib
 

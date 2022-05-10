@@ -1,5 +1,0 @@
-"0","classes_metabric <- read.table(""../data/metabric_subtypes.txt"") %>%"
-"0","    `colnames<-`(c(""name_patient"", ""cohort"", ""subtype"")) %>%"
-"0","    dplyr::mutate(name_patient = stringr::str_replace(name_patient, ""\\."", ""-""))"
-"0",""
-"0","classes_metabric %>% head"
