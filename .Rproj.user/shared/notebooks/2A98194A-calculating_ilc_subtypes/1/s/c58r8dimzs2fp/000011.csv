@@ -1,2 +1,0 @@
-"0","ilc_metabric <- colData(metabric) %>% data.frame %>% "
-"0","    dplyr::filter(HISTOLOGICAL_SUBTYPE == ""Lobular"")"
