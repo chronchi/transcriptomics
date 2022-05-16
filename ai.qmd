@@ -48,7 +48,7 @@ you have bioconductor) let us check the expression levels of the
 expression set downloaded with GEOquery.
 
 ```{r}
-exprs(gse_ai)
+exprs(gse_ai)[, 1:5] %>% head
 ```
 
 And since this is a microarray experiment we need information to 
@@ -57,7 +57,7 @@ feature slot of the expression set above. To retrieve it use
 the function `fData`.
 
 ```{r}
-fData(gse_ai)
+fData(gse_ai) %>% head
 ```
 
 And now load the ki67 levels data from the supplementary material. Remember

@@ -11,6 +11,9 @@ To do PCA on R I highly recommend to use the package
 
 With this package one can use metadata to customize the PCA biplots. 
 
+To do a pairs plot you can either use the function `pairsplot` from the 
+package `PCAtools`or the function `ggpairs` from the package `GGally`. 
+
 ## Survival analysis
 
 A very good starter to survival analysis can be found in this page:
