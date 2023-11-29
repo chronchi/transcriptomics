@@ -1,0 +1,268 @@
+# TCGA
+
+Get dataset from tcga following procedure in
+https://www.bioconductor.org/packages/release/workflows/vignettes/SingscoreAMLMutations/inst/doc/workflow_transcriptional_mut_sig.html#3_Downloading_and_preparing_the_data
+
+```{r}
+library(dplyr)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(edgeR)
+library(rtracklayer)
+```
+
+```{r}
+setwd(file.path("~", "Documents", "BioRepo"))
+
+query_rna <- TCGAbiolinks::GDCquery(
+    project = 'TCGA-BRCA',
+    data.category = 'Transcriptome Profiling',
+    data.type = 'Gene Expression Quantification',
+    workflow.type = 'HTSeq - Counts'
+)
+
+rnaseq_res <- TCGAbiolinks::getResults(query_rna)
+# the number of rows corresponds to the number of rna-seq samples. notice
+# that you can have two samples coming from the same patient.
+dim(rnaseq_res)
+```
+
+Path to download data:
+```{r}
+tmp_dir <- tempdir()
+datapath <- file.path(tmp_dir, 'GDCdata')
+TCGAbiolinks::GDCdownload(query_rna, directory = datapath)
+brca_se <- TCGAbiolinks::GDCprepare(query_rna, directory = datapath)
+```
+
+We will save the steps in the meantime in case there is 
+a problem in the pipeline, therefore we don't redo all the steps
+
+```{r}
+# save brca_se containing all samples
+saveRDS(
+    brca_se, 
+    file.path("Data", "20210313_tcga_brca", "tcga_brca_all.rds")
+)
+```
+
+```{r}
+brca_se <- readRDS("Data/20210313_tcga_brca/tcga_brca_all.rds")
+# remove samples that we are not interested. so we only get tumor samples
+# from patients with clinical data. we can get the same patients as 
+# from the clinical_data dataframe
+clinical_data_gdc <- colData(brca_se)
+clinical_data_gdc <- clinical_data_gdc[!clinical_data_gdc$is_ffpe, ]
+clinical_data_gdc <- clinical_data_gdc[clinical_data_gdc$sample_type_id == "01", ]
+```
+
+We now filter the clinical data to remove those patient in stage x as 
+these are tumors that couldn't be evaluated
+
+```{r}
+clinical_data_gdc <-
+    clinical_data_gdc[!is.na(clinical_data_gdc$tumor_stage), ]
+clinical_data_gdc <-
+    clinical_data_gdc[clinical_data_gdc$tumor_stage != "stage x", ]
+
+# get molecular subtypes and append to clinical data
+subtypes <- TCGAbiolinks::PanCancerAtlas_subtypes() %>%
+    dplyr::filter(cancer.type == "BRCA") %>%
+    dplyr::filter(substring(pan.samplesID, 14, 15) == "01") %>%
+    dplyr::filter(!duplicated(pan.samplesID)) %>% data.frame()
+
+rownames(subtypes) <- subtypes$pan.samplesID
+
+clinical_data_gdc$molecular_subtype <- 
+    subtypes[rownames(clinical_data_gdc), "Subtype_mRNA"]
+
+# remove patients without molecular subtype data
+clinical_data_gdc <- 
+    clinical_data_gdc[!is.na(clinical_data_gdc$molecular_subtype), ]
+```
+
+We now calculate the time to death or last followup and append
+to the clinical data. this is the time to event we are analysing. 
+
+```{r}
+time_status_patients <-
+    apply(
+        clinical_data_gdc,
+        1,
+        function(x){
+            
+            days_to_death <- x[["days_to_death"]]
+            days_to_last_follow_up <- x[["days_to_last_follow_up"]]
+            status_patient <- c()
+            
+            if(is.na(days_to_death) && is.na(days_to_last_follow_up)){
+                time_patient <- NA
+                status_patient <- c(status_patient, NA)
+            } else if (is.na(days_to_death)) {
+                time_patient <- as.numeric(days_to_last_follow_up)
+                status_patient <- c(status_patient, 1)
+            } else {
+                time_patient <- as.numeric(days_to_death)
+                status_patient <- c(status_patient, 2)
+            }
+            
+            c(time_patient, status_patient)
+        }
+    )
+
+clinical_data_gdc$status <- time_status_patients[2, ]
+clinical_data_gdc$time <- time_status_patients[1, ]
+
+# remove the patients with no time or status 
+clinical_data_gdc <- clinical_data_gdc[
+    (!is.na(clinical_data_gdc$time)) & (!is.na(clinical_data_gdc$status)),
+    
+]
+
+clinical_data_gdc <- clinical_data_gdc[
+    clinical_data_gdc$time != 0,
+    
+]
+```
+
+Let us add the ER and PR status for the patients. For this we need to 
+use another dataset that was downloaded from GDC.
+
+```{r}
+clinical_data_er <- 
+    read.csv(
+        file.path(
+            "Data",
+            "20210313_tcga_brca",
+            "clinical_data",
+            "nationwidechildrens.org_clinical_patient_brca.txt"
+        ), 
+        header = 1, 
+        sep = "\t"
+    )
+
+rownames(clinical_data_er) <- clinical_data_er$bcr_patient_barcode
+
+# add er and pr status to original clinical data
+clinical_data_gdc$er_status <- 
+    clinical_data_er[
+        clinical_data_gdc[, "patient"],
+        "breast_carcinoma_estrogen_receptor_status"
+    ]
+
+clinical_data_gdc$pr_status <- 
+    clinical_data_er[
+        clinical_data_gdc[, "patient"], 
+        "breast_carcinoma_progesterone_receptor_status"
+    ]
+
+# keep only the patients filtered above
+brca_se <- brca_se[, rownames(clinical_data_gdc)]
+colData(brca_se) <- clinical_data_gdc
+
+saveRDS(brca_se, file.path(tmp_dir, "brca_se_filter.Rdata"))
+```
+
+```{r}
+# filter genes lowly expressed in 30% of the samples
+brca_dge <- edgeR::DGEList(counts = assay(brca_se), genes = rowData(brca_se))
+prop_expressed <- rowMeans(cpm(brca_dge) > 1)
+keep <- prop_expressed > 0.3
+
+# check the distribution of the counts
+op = par(no.readonly = TRUE)
+par(mfrow = c(1, 2))
+hist(cpm(brca_dge, log = TRUE), main = 'Unfiltered', xlab = 'logCPM')
+abline(v = log(1), lty = 2, col = 2)
+hist(cpm(brca_dge[keep, ], log = TRUE), main = 'Filtered', xlab = 'logCPM')
+abline(v = log(1), lty = 2, col = 2)
+```
+
+```{r}
+brca_dge <- brca_dge[keep, , keep.lib.sizes = FALSE]
+brca_se <- brca_se[keep, ]
+
+saveRDS(
+    brca_se, 
+    file.path(tmp_dir, "brca_se_filter_gene.Rdata")
+)
+```
+
+Now we get the gene length information for the normalization step.
+```{r}
+gencode_file <- 'gencode.v22.annotation.gtf.gz'
+gencode_link <- 
+    paste(
+        'ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_22',
+        gencode_file,
+        sep = '/'
+    )
+
+path_to_gencode <- file.path("Data", "20210313_tcga_brca", gencode_file)
+
+download.file(gencode_link, path_to_gencode, method = 'libcurl')
+
+gtf <- rtracklayer::import.gff(
+    path_to_gencode, 
+    format = 'gtf', 
+    genome = 'GRCm38.71', 
+    feature.type = 'exon'
+)
+
+# split records by gene to group exons of the same gene
+grl <- reduce(split(gtf, elementMetadata(gtf)$gene_id))
+gene_lengths <-
+    sapply(
+        grl, 
+        function(x) {
+            #sum up the length of individual exons
+            c('gene_length' = sum(width(x)))
+        }
+    )
+
+gene_lengths_tmp <- 
+    data.frame(gene_length = gene_lengths, row.names = names(grl))
+
+#extract information on gene biotype
+genetype <- unique(elementMetadata(gtf)[, c('gene_id', 'gene_type')])
+colnames(genetype)[1] <- 'ensembl_gene_id'
+rownames(genetype) <- genetype$ensembl_gene_id
+
+gene_lengths_tmp$gene_type <- 
+    genetype[rownames(gene_lengths_tmp), "gene_type"] 
+gene_lengths_tmp$ensembl_gene_id <- 
+    genetype[rownames(gene_lengths_tmp), "ensembl_gene_id"] 
+
+#remove ENSEMBL ID version numbers
+gene_lengths_tmp$ensembl_gene_id <- 
+    gsub('\\.[0-9]*', '', gene_lengths_tmp$ensembl_gene_id)
+
+saveRDS(
+    gene_lengths_tmp, 
+    file = file.path(tmp_dir, "gene_lengths_HTSeq_gencodev22.rds")
+)
+
+gene_lengths <- gene_lengths_tmp
+rownames(gene_lengths) <- gene_lengths$ensembl_gene_id
+rowData(brca_se)$gene_length <- gene_lengths[rownames(brca_se), 'gene_length']
+rowData(brca_se)$gene_biotype <- gene_lengths[rownames(brca_se), 'gene_type']
+
+#annotate gene lengths for the DGE object
+brca_dge$genes$length <- gene_lengths[rownames(brca_dge), 'gene_length']
+
+# calculate the tmm normalization from edgeR
+brca_dge_tmm <- calcNormFactors(brca_dge, method = 'TMM')
+
+# compute log FPKM values and append to assays
+assay(brca_se, 'logFPKM_TMM') <- rpkm(brca_dge_tmm, log = TRUE)
+assay(brca_se, "vst") <- DESeq2::vst(assay(brca_se))
+```
+
+Save the final dataset.
+```{r}
+saveRDS(
+    brca_se, 
+    file = file.path("Data", "20210313_tcga_brca", "tcga_brca_tumor_filtered.rds")
+)
+```

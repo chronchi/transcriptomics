@@ -1,5 +1,6 @@
 project:
   type: book
+  output-dir: docs
 
 book:
   title: "Cleaning transcriptomic datasets"
@@ -7,9 +8,10 @@ book:
   date: "2022.05.04"
   chapters:
     - index.qmd
-    - ai.qmd
+    - tcga.qmd
     - metabric.qmd
-    - scanb.qmd
+    - scanb_new.qmd
+    - ai.qmd
     - resources.qmd
 
 bibliography: references.bib
@@ -20,6 +22,7 @@ execute:
 format:
   html:
     theme: cosmo
+    date-modified: last-modified
   pdf:
     documentclass: scrreprt
 

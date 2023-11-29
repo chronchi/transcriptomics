@@ -1,0 +1,104 @@
+# SCANB (2022 release)
+
+```{r setup}
+library(rlang)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(tidyr)
+library(janitor)
+
+library(SummarizedExperiment)
+```
+
+Data downloaded from: https://data.mendeley.com/datasets/yzxtxn4nmd/3,
+version 3, 2023-01-25. We downloaded the data that is not adjusted by 
+protocol to look like Tru-Seq. That means we cannot directly take the 
+gene expression levels and compare among all the cohorts, we can only
+calculate scores and then compare them, depending on the tool 
+being used. The folder from which data was downloaded is 
+*StringTie FPKM Gene Data unadjusted*. The description is given as:
+
+> Gene expression FPKM data as outputted by StringTie and summarized
+on gene identifier. The gene expression data used for training
+SSP models and for classification of samples using
+the trained SSPs.
+
+## Loading Rdata files
+
+First we load the Rdata files that contain the gene expression levels
+and also the gene annotation.
+
+```{r}
+sapply(
+    list.files(
+        path = "../../Data/20230125_scanb", 
+        full.names = TRUE, 
+        pattern = "Rdata"
+    ),
+    load,
+    envir = globalenv()
+)
+
+scanb_9206 <- SCANB.9206.mymatrix
+rm(SCANB.9206.mymatrix)
+
+abim_100 <- ABiM.100.mymatrix
+abim_405 <- ABiM.405.mymatrix
+rm(ABiM.100.mymatrix)
+rm(ABiM.405.mymatrix)
+
+normal_66 <- Normal.66.mymatrix
+rm(Normal.66.mymatrix)
+
+oslo_103 <- OSLO2EMIT0.103.mymatrix
+rm(OSLO2EMIT0.103.mymatrix)
+
+gene_id_ann <- Gene.ID.ann
+rm(Gene.ID.ann)
+
+datasets <- list()
+which_assay <- list()
+```
+
+All the gene anottations are available in the object `gene_id_ann`, which will
+be used for scoring. 
+
+## Loading clinical data from SCAN-B
+
+```{r}
+sheets <- c("SCANB.9206", "ABiM.100", "OSLO2EMITO.103", "ABiM.405", "Normal.66")
+
+clin_data <- suppressWarnings({readxl::read_excel(
+    "../../Data/20230125_scanb/Supplementary Data Table 1 - 2023-01-13.xlsx",
+    sheet = sheets[1], 
+    progress = TRUE
+)})
+
+datasets$scanb <- SummarizedExperiment::SummarizedExperiment(
+    assays = list("FPKM" = scanb_9206[, dplyr::pull(clin_data, "GEX.assay")]),
+    colData = clin_data %>% data.frame %>%
+        `rownames<-`(clin_data$GEX.assay)
+)
+which_assay$scanb <- "FPKM"
+```
+
+```{r}
+# convert ensembl genes to hugo IDs
+rownames(datasets$scanb) <- gene_id_ann[rownames(scanb_9206), "Gene.Name"]
+
+# check what are the duplicated genes to see if we can safely drop them
+dup_genes <- rownames(datasets$scanb)[duplicated(rownames(datasets$scanb))] %>%
+    table
+
+dup_genes
+```
+
+Due to the lower amount of genes and the fact each gene has only one copy 
+duplicated, we select the first one.
+
+```{r}
+datasets$scanb <- datasets$scanb[!duplicated(rownames(datasets$scanb)), ]
+
+saveRDS(datasets$scanb, "../../Data/20230125_scanb/scanb_sumexp.rds")
+```

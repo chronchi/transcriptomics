@@ -1,4 +1,4 @@
-# SCANB
+# SCANB (2018 release)
 
 ## Packages to use
 
